@@ -1,0 +1,68 @@
+# ── Virtual environment ───────────────────────────────────────
+venv/
+env/
+.env/
+.venv/
+
+# ── ChromaDB vector index (large, rebuild with build_index.py) ─
+chroma_imdb/
+chroma_movielens/
+chroma_*/
+
+# ── Downloaded dataset (rebuild with download_data.py) ────────
+imdb_movies.csv
+movies.dat
+ml-1m/
+*.dat
+
+# ── Python cache ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# ── Environment variables / secrets ──────────────────────────
+.env
+.env.*
+*.env
+HF_TOKEN
+
+# ── Jupyter notebooks checkpoints ────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS generated files ────────────────────────────────────────
+.DS_Store
+.DS_Store?
+Thumbs.db
+desktop.ini
+
+# ── IDE / editor files ────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Model weights / large binary files ────────────────────────
+*.bin
+*.pt
+*.pth
+*.gguf
+*.safetensors
+models/
+
+# ── Pytest / coverage ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Build / dist ──────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
