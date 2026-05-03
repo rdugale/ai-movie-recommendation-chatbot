@@ -71,8 +71,10 @@ source venv/bin/activate
 ```bash
 pip install langchain langgraph langchain-ollama langchain-chroma \
             langchain-huggingface chromadb sentence-transformers \
-            datasets gradio pandas scikit-learn
+            datasets gradio pandas scikit-learn python-dotenv groq \
+            torch torchvision torchaudio
 ```
+append --index-url https://download.pytorch.org/whl/cu124  after torchaudio when want to use GPU
 
 ### 4. Install Ollama and pull the model
 
@@ -137,7 +139,7 @@ Downloads ~238k movies with title, genre, rating, and plot descriptions from Hug
 python3 build_index.py
 ```
 
-Embeds all movies using `all-MiniLM-L6-v2` and stores them in ChromaDB. Takes ~5–10 minutes depending on hardware. Creates the `chroma_imdb/` folder.
+Embeds all movies using `all-MiniLM-L6-v2` and stores them in ChromaDB. Takes ~11–31 minutes depending on hardware. Creates the `chroma_imdb/` folder.
 
 ### Step 3a — Run the CLI chatbot
 
@@ -223,21 +225,9 @@ The embeddings deliberately run on CPU to leave all VRAM free for Ollama. This i
 
 ---
 
-## LinkedIn description
+## Added API LLM call for classify and generate node
 
-> Built a fully local AI-powered movie recommendation chatbot using **LangChain**, **LangGraph**, **RAG**, **ChromaDB**, and **Ollama** — no paid APIs, no data leaving your machine.
->
-> The system is an **Agentic RAG application**: a LangGraph agent classifies each user message and dynamically routes it — fetching relevant movies from a 238k-movie ChromaDB vector store, refining results while avoiding duplicates, answering analytical queries directly from metadata, or falling back to general conversation. The local LLM (`phi3:mini` via Ollama) generates all responses grounded in retrieved context, eliminating hallucinations.
->
-> 🛠️ Stack: LangChain · LangGraph · ChromaDB · sentence-transformers · Ollama · Gradio · Python
-> 📦 Dataset: IMDb genres dataset via HuggingFace (238k movies with plot descriptions)
-> 💻 Runs entirely on a GTX 1650 (4 GB VRAM) — no cloud, no API costs
-
----
-
-## License
-
-MIT License — free to use, modify, and distribute.
+used Grok for API LLM call for classify and generate node logic, which can be turned on/off using boolean flag , create .env file add GROQ_API_KEY key to pass Grok api key for api call  visit - [console.groq.com](https://console.groq.com/)
 
 ---
 

@@ -16,7 +16,12 @@ from collections import Counter
 # Add this at module level — loads once, stays in memory
 _metadata_cache: list[dict] | None = None
 STATS_DB = "./movie_stats.db"
+USE_API_CLASSIFIER = False
+USE_API_GENERATOR  = False
 llm = OllamaLLM(model="phi3:mini", temperature=0.2, num_predict=4096)
+
+if USE_API_CLASSIFIER or USE_API_GENERATOR:
+    from llm_api import classify_with_api, generate_recommendation_with_api
 
 embeddings = HuggingFaceEmbeddings(
     model_name="all-MiniLM-L6-v2",
@@ -274,11 +279,14 @@ def classify_node(state: ChatbotState) -> dict:
     max_year = None
     min_rating = None
     max_rating = None
-    try:
-        clean  = raw.strip().strip("```json").strip("```").strip()
-        start  = clean.find("{")
-        end    = clean.rfind("}") + 1
-        parsed = json.loads(clean[start:end])
+    
+    if USE_API_CLASSIFIER:
+        # API: Groq llama-3.3-70b (fast, accurate JSON)
+        parsed = classify_with_api(last_msg)
+        intent     = parsed["intent"]
+        merged_genres = list(set(
+            state.get("liked_genres", []) + parsed["genres"]
+        ))
         
         intent = parsed.get("intent", "chitchat")
         genres = parsed.get("genres", [])
@@ -286,12 +294,26 @@ def classify_node(state: ChatbotState) -> dict:
         max_year = parsed.get("max_year")
         min_rating = parsed.get("min_rating")
         max_rating = parsed.get("max_rating")
-        
-    except Exception:
-        # Fallback if the small LLM messes up the JSON formatting
-        lower = last_msg.lower()
-        if any(w in lower for w in ["recommend", "suggest", "find me"]):
-            intent = "recommend"
+    else:
+
+        try:
+            clean  = raw.strip().strip("```json").strip("```").strip()
+            start  = clean.find("{")
+            end    = clean.rfind("}") + 1
+            parsed = json.loads(clean[start:end])
+            
+            intent = parsed.get("intent", "chitchat")
+            genres = parsed.get("genres", [])
+            min_year = parsed.get("min_year")
+            max_year = parsed.get("max_year")
+            min_rating = parsed.get("min_rating")
+            max_rating = parsed.get("max_rating")
+            
+        except Exception:
+            # Fallback if the small LLM messes up the JSON formatting
+            lower = last_msg.lower()
+            if any(w in lower for w in ["recommend", "suggest", "find me"]):
+                intent = "recommend"
 
     existing = state.get("liked_genres", [])
     merged   = list(set(existing + [g.lower() for g in genres]))
@@ -379,7 +401,7 @@ def retrieve_node(state: ChatbotState) -> dict:
 
     results_to_show = unique_docs[:10]
 
-    # ✅ Clean formatting
+    # Clean formatting
     context_lines = []
     for i, d in enumerate(results_to_show):
         genres_raw = d.metadata.get('genres', '')
@@ -435,7 +457,7 @@ def refine_node(state: ChatbotState) -> dict:
 
 
 # ── Node 5: generate RAG answer ───────────────────────────────
-# following code was commented as LLM was outputing 2-3 list of movies despite have more than it , if you can run large model then use following block 
+# following code was commented as local LLM was outputing 2-3 list of movies despite having passed more than it as context , if you can run large model then use following block 
 # def generate_rag_node(state: ChatbotState) -> dict:
 #     liked     = state.get("liked_genres", [])
 #     pref_note = f"The user likes: {', '.join(liked)}. " if liked else ""
@@ -465,7 +487,7 @@ def refine_node(state: ChatbotState) -> dict:
 #     })
 #     return {"messages": [AIMessage(content=response)]}
 
-# following code is added as alternative LLM processing
+# following code is added as alternative to LLM processing and to call extrenal API call for LLM
 def generate_rag_node(state: ChatbotState) -> dict:
     context = state.get("context", "")
 
@@ -478,11 +500,28 @@ def generate_rag_node(state: ChatbotState) -> dict:
             )]
         }
 
-    # ✅ Format directly — no LLM needed for structured data
+    # Format directly — no LLM needed for structured data
     liked = state.get("liked_genres", [])
-    pref_note = f"Based on your interest in {', '.join(liked)}:\n\n" if liked else ""
+    if USE_API_GENERATOR:
+        # API: let LLM format conversationally
+        # Build conversation history as dicts for the API
+        history = []
+        for msg in state.get("messages", []):
+            if isinstance(msg, HumanMessage):
+                history.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                history.append({"role": "assistant", "content": msg.content})
 
-    reply = pref_note + context
+        reply = generate_recommendation_with_api(
+            user_query=state.get("last_query", ""),
+            context=context,
+            liked_genres=liked,
+            conversation_history=history
+        )
+    else:
+        pref_note = f"Based on your interest in {', '.join(liked)}:\n\n" if liked else ""
+
+        reply = pref_note + context
 
     return {"messages": [AIMessage(content=reply)]}
 
