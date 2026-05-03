@@ -227,7 +227,7 @@ The embeddings deliberately run on CPU to leave all VRAM free for Ollama. This i
 
 ## Added API LLM call for classify and generate node
 
-used Grok for API LLM call for classify and generate node logic, which can be turned on/off using boolean flag , create .env file add GROQ_API_KEY key to pass Grok api key for api call  visit - [console.groq.com](https://console.groq.com/)
+using Grok for API LLM call for classify and generate node logic, which can be turned on/off using boolean flag , create .env file add GROQ_API_KEY key, to create and use free API key visit - [console.groq.com](https://console.groq.com/) and create account
 
 ---
 
