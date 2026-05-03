@@ -8,6 +8,7 @@ env/
 chroma_imdb/
 chroma_movielens/
 chroma_*/
+movie_stats.db
 
 # ── Downloaded dataset (rebuild with download_data.py) ────────
 imdb_movies.csv

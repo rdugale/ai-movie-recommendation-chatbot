@@ -1,5 +1,6 @@
 import os
 import json
+import sqlite3
 from typing import TypedDict, Annotated, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -11,9 +12,11 @@ from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import OllamaLLM
 from collections import Counter
-
 # ── Setup ─────────────────────────────────────────────────────
-llm = OllamaLLM(model="phi3:mini", temperature=0.2, num_predict=500)
+# Add this at module level — loads once, stays in memory
+_metadata_cache: list[dict] | None = None
+STATS_DB = "./movie_stats.db"
+llm = OllamaLLM(model="phi3:mini", temperature=0.2, num_predict=4096)
 
 embeddings = HuggingFaceEmbeddings(
     model_name="all-MiniLM-L6-v2",
@@ -26,14 +29,105 @@ vectorstore = Chroma(
     embedding_function=embeddings,
     collection_name="imdb_movies",
 )
-retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+retriever = vectorstore.as_retriever(search_kwargs={"k": 15})
+
+def build_stats_database():
+    """
+    Runs ONCE at startup. Reads all ChromaDB metadata
+    and writes it into a fast local SQLite database.
+    Takes ~10-15 seconds for 230K, then every query is instant.
+    """
+    print("Building stats database (one-time)...", flush=True)
+
+    conn = sqlite3.connect(STATS_DB)
+    c = conn.cursor()
+
+    # Drop and recreate
+    c.execute("DROP TABLE IF EXISTS movies")
+    c.execute("""
+        CREATE TABLE movies (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            year INTEGER,
+            rating REAL,
+            genres TEXT
+        )
+    """)
+    c.execute("CREATE INDEX idx_genres ON movies(genres)")
+    c.execute("CREATE INDEX idx_year ON movies(year)")
+    c.execute("CREATE INDEX idx_rating ON movies(rating)")
+
+    # Fetch all metadata from ChromaDB in batches
+    all_meta = []
+    offset = 0
+    total = vectorstore._collection.count()
+
+    while offset < total:
+        result = vectorstore._collection.get(
+            limit=5000,
+            offset=offset,
+            include=["metadatas"]
+        )
+        all_meta.extend(result["metadatas"])
+        offset += 5000
+        print(f"  Fetched {min(offset, total):,} / {total:,}", flush=True)
+
+    # Insert into SQLite
+    rows = []
+    for m in all_meta:
+        try:
+            rating = float(m.get("rating", 0))
+        except (ValueError, TypeError):
+            rating = 0.0
+        try:
+            year = int(m.get("year", 0))
+        except (ValueError, TypeError):
+            year = 0
+
+        raw_genres = m.get("genres", "")
+
+        if isinstance(raw_genres, list):
+            genres_str = ", ".join(raw_genres).lower()   # ["Action","Sci-Fi"] → "action, sci-fi"
+        else:
+            genres_str = str(raw_genres).lower()
+
+        rows.append((
+            m.get("title", ""),
+            year,
+            rating,
+            genres_str
+        ))
+
+    c.executemany("INSERT INTO movies (title, year, rating, genres) VALUES (?,?,?,?)", rows)
+    conn.commit()
+
+    # Pre-build genre counts table for instant lookups
+    c.execute("DROP TABLE IF EXISTS genre_counts")
+    c.execute("""
+        CREATE TABLE genre_counts AS
+        SELECT genre, COUNT(*) as cnt
+        FROM (
+            SELECT TRIM(value) as genre
+            FROM movies, json_each('["' || REPLACE(genres, ',', '","') || '"]')
+            WHERE TRIM(value) != ''
+        )
+        GROUP BY genre
+        ORDER BY cnt DESC
+    """)
+    conn.commit()
+    conn.close()
+
+    print(f"Stats database built with {len(rows):,} movies")
 
 # ── DB helper: batched metadata fetch ────────────────────────
 def get_all_metadata(batch_size: int = 5000) -> list[dict]:
-    """Fetch all ChromaDB metadata in batches to avoid SQLite variable limit."""
+    global _metadata_cache
+    if _metadata_cache is not None:
+        return _metadata_cache
+
     all_meta = []
-    offset   = 0
-    total    = vectorstore._collection.count()
+    offset = 0
+    total = vectorstore._collection.count()
 
     while offset < total:
         result = vectorstore._collection.get(
@@ -44,7 +138,8 @@ def get_all_metadata(batch_size: int = 5000) -> list[dict]:
         all_meta.extend(result["metadatas"])
         offset += batch_size
 
-    return all_meta
+    _metadata_cache = all_meta
+    return _metadata_cache
 
 def query_db_stats(user_msg: str) -> str | None:
     msg = user_msg.lower()
@@ -52,20 +147,19 @@ def query_db_stats(user_msg: str) -> str | None:
     stat_triggers = ["count", "how many", "number of", "total",
                      "least rated", "lowest rated", "most rated",
                      "highest rated", "best rated", "worst rated",
-                     "top rated", "display", "show"]
+                     "top rated"]
     if not any(k in msg for k in stat_triggers):
         return None
 
-    all_meta = get_all_metadata()
-    total    = len(all_meta)
+    conn = sqlite3.connect(STATS_DB)
+    c = conn.cursor()
 
     genre_map = {
         "sci-fi": "sci-fi", "scifi": "sci-fi", "science fiction": "sci-fi",
         "action": "action", "comedy": "comedy", "drama": "drama",
         "horror": "horror", "thriller": "thriller", "romance": "romance",
-        "animation": "animation", "animated": "animation",
-        "crime": "crime", "adventure": "adventure", "fantasy": "fantasy",
-        "documentary": "documentary", "biography": "biography",
+        "animation": "animation", "crime": "crime",
+        "adventure": "adventure", "fantasy": "fantasy",
     }
 
     matched_genre = next(
@@ -74,108 +168,59 @@ def query_db_stats(user_msg: str) -> str | None:
 
     results = []
 
-    # ── Count section ─────────────────────────────────────────
-    if any(k in msg for k in ["count", "how many", "number of", "total",
-                               "list count"]):
+    # ── COUNT ─────────────────────────────────────────────
+    if any(k in msg for k in ["count", "how many", "number of", "total","list count"]):
         if matched_genre:
-            count = sum(
-                1 for m in all_meta
-                if matched_genre.lower() in m.get("genres", "").lower()
+            c.execute(
+                "SELECT COUNT(*) FROM movies WHERE genres LIKE ?",
+                (f"%{matched_genre}%",)
             )
+            count = c.fetchone()[0]
+            total = c.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
             results.append(
-                f"Total **'{matched_genre}'** movies in ChromaDB: **{count:,}** "
+                f"Total **'{matched_genre}'** movies: **{count:,}** "
                 f"(out of {total:,} total)"
             )
         else:
-            from collections import Counter
-            genre_counter = Counter()
-            for m in all_meta:
-                for g in m.get("genres", "").split(","):
-                    g = g.strip()
-                    if g:
-                        genre_counter[g] += 1
-            top       = genre_counter.most_common(10)
+            c.execute("SELECT genre, cnt FROM genre_counts LIMIT 15")
+            top = c.fetchall()
+            total = c.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
             breakdown = "\n".join(f"  {g}: {c:,}" for g, c in top)
             results.append(
-                f"Total movies in ChromaDB: **{total:,}**\n\n"
-                f"Top 10 genres:\n{breakdown}"
+                f"Total movies: **{total:,}**\n\nTop genres:\n{breakdown}"
             )
 
-    # ── Rating section ────────────────────────────────────────
-    rating_triggers = ["least rated", "lowest rated", "worst rated",
-                       "most rated", "highest rated", "best rated",
-                       "top rated", "least", "highest", "lowest"]
-
+    # ── HIGHEST / LOWEST RATED ────────────────────────────
+    rating_triggers = ["highest rated", "best rated", "top rated",
+                       "lowest rated", "worst rated", "least rated"]
     if any(k in msg for k in rating_triggers):
+        is_highest = any(k in msg for k in ["highest", "best", "top"])
+        order = "DESC" if is_highest else "ASC"
+        label = "Highest" if is_highest else "Lowest"
 
-        # ── Per-genre breakdown ───────────────────────────────
-        per_genre_keywords = ["each genre", "every genre", "per genre",
-                               "all genre", "each", "every", "per"]
-        do_per_genre = any(k in msg for k in per_genre_keywords)
-
-        if do_per_genre:
-            # Collect all unique genres
-            from collections import defaultdict
-            genre_buckets = defaultdict(list)
-            for m in all_meta:
-                if m.get("rating", "") in ("", "nan", "N/A", None):
-                    continue
-                try:
-                    rating = float(m["rating"])
-                except (ValueError, KeyError):
-                    continue
-                for g in m.get("genres", "").split(","):
-                    g = g.strip()
-                    if g:
-                        genre_buckets[g].append((rating, m))
-
-            # Sort each genre bucket and pick best/worst
-            genre_lines = []
-            for genre in sorted(genre_buckets.keys()):
-                bucket = sorted(genre_buckets[genre], key=lambda x: x[0])
-                worst_r, worst = bucket[0]
-                best_r,  best  = bucket[-1]
-                genre_lines.append(
-                    f"\n🎬 **{genre}** ({len(bucket):,} rated movies)\n"
-                    f"   ⭐ Highest: {best.get('title','N/A')} "
-                    f"({best.get('year','N/A')}) — {best_r}/10\n"
-                    f"   💤 Lowest:  {worst.get('title','N/A')} "
-                    f"({worst.get('year','N/A')}) — {worst_r}/10"
-                )
-
-            results.append("\n**Highest & Lowest rated movie per genre:**\n"
-                           + "\n".join(genre_lines))
-
+        if matched_genre:
+            row = c.execute(
+                f"SELECT title, year, rating, genres FROM movies "
+                f"WHERE genres LIKE ? AND rating > 0 "
+                f"ORDER BY rating {order} LIMIT 1",
+                (f"%{matched_genre}%",)
+            ).fetchone()
         else:
-            # Single genre or overall — existing logic
-            candidates = [
-                m for m in all_meta
-                if (matched_genre is None or
-                    matched_genre.lower() in m.get("genres", "").lower())
-                and m.get("rating", "") not in ("", "nan", "N/A", None)
-            ]
-            try:
-                candidates.sort(key=lambda m: float(m["rating"]))
-            except (ValueError, KeyError):
-                pass
+            row = c.execute(
+                f"SELECT title, year, rating, genres FROM movies "
+                f"WHERE rating > 0 ORDER BY rating {order} LIMIT 1"
+            ).fetchone()
 
-            if candidates:
-                worst = candidates[0]
-                best  = candidates[-1]
-                label = f"'{matched_genre}'" if matched_genre else "all genres"
-                results.append(
-                    f"\n⭐ **Highest rated** {label} movie:\n"
-                    f"   Title:   {best.get('title', 'N/A')} ({best.get('year', 'N/A')})\n"
-                    f"   Genres:  {best.get('genres', 'N/A')}\n"
-                    f"   Rating:  {best.get('rating', 'N/A')}/10\n"
-                    f"\n💤 **Lowest rated** {label} movie:\n"
-                    f"   Title:   {worst.get('title', 'N/A')} ({worst.get('year', 'N/A')})\n"
-                    f"   Genres:  {worst.get('genres', 'N/A')}\n"
-                    f"   Rating:  {worst.get('rating', 'N/A')}/10"
-                )
-            else:
-                results.append(f"\nNo rated movies found for '{matched_genre}'.")
+        if row:
+            results.append(
+                f"⭐ **{label} rated** {'(' + matched_genre + ')' if matched_genre else ''}:\n"
+                f"   {row[0]} ({row[1]}) — {row[2]}/10\n"
+                f"   Genres: {row[3]}"
+            )
+
+    conn.close()
     return "\n".join(results) if results else None
+
 
 # ── State ─────────────────────────────────────────────────────
 class ChatbotState(TypedDict):
@@ -185,11 +230,13 @@ class ChatbotState(TypedDict):
     liked_genres: list[str]
     seen_titles:  list[str]
     last_query:   str
+    min_year:     float | None 
+    max_year:     float | None
+    min_rating:   float | None
+    max_rating:   float | None
 
 # ── Node 1: classify ──────────────────────────────────────────
-
 def classify_node(state: ChatbotState) -> dict:
-    # Guard: if messages is empty something went wrong upstream
     if not state.get("messages"):
         return {"intent": "chitchat", "liked_genres": [], "last_query": ""}
 
@@ -199,91 +246,170 @@ def classify_node(state: ChatbotState) -> dict:
     db_answer = query_db_stats(last_msg)
     if db_answer:
         return {"intent": "db_stats", "last_query": last_msg,
-                "liked_genres": state.get("liked_genres", [])}
+                "liked_genres": state.get("liked_genres", []),"context": db_answer}
 
-    # Otherwise classify with LLM — use a tighter prompt
-    # REPLACE the classify prompt with this — all { } in examples are escaped
+    # Updated Prompt to extract numbers
     prompt = ChatPromptTemplate.from_messages([
         ("system",
         'Reply with JSON only. No markdown, no explanation.\n'
-        'Schema: {{"intent": "...", "genres": [...]}}\n\n'
+        'Schema: {{"intent": "...", "genres": [...], "min_year": int|null, "max_year": int|null, "min_rating": float|null, "max_rating": float|null}}\n\n'
         'intent values:\n'
-        '  "recommend" — user wants movie suggestions or recommendations\n'
-        '  "refine"    — user wants different/more/other results than before\n'
-        '  "chitchat"  — anything else: greetings, explanations, opinions\n\n'
+        '  "recommend" — user wants movie suggestions\n'
+        '  "refine"    — user wants different results\n'
+        '  "chitchat"  — anything else\n\n'
         'genres: list any film genres explicitly mentioned, else []\n\n'
         'Examples:\n'
-        '  "recommend sci-fi movies"  -> {{"intent":"recommend","genres":["sci-fi"]}}\n'
-        '  "suggest action films"     -> {{"intent":"recommend","genres":["action"]}}\n'
-        '  "show me different ones"   -> {{"intent":"refine","genres":[]}}\n'
-        '  "what is a black hole"     -> {{"intent":"chitchat","genres":[]}}\n'),
+        '  "action movies after 2010 above 7" -> {{"intent":"recommend", "genres":["action"], "min_year": 2010, "max_year": null, "min_rating": 7.0}}\n'
+        '  "sci-fi between 1990 and 2000" -> {{"intent":"recommend", "genres":["sci-fi"], "min_year": 1990, "max_year": 2000, "min_rating": null}}\n'
+        '  "suggest comedy films" -> {{"intent":"recommend", "genres":["comedy"], "min_year": null, "max_year": null, "min_rating": null}}\n'),
         ("human", "{message}")
     ])
 
     raw = (prompt | llm | StrOutputParser()).invoke({"message": last_msg})
 
-    # Debug: uncomment to see raw LLM output
-    # print(f"\n  [DEBUG classify raw]: {raw!r}")
-
+    # Safely declare default variables
+    intent = "chitchat"
+    genres = []
+    min_year = None
+    max_year = None
+    min_rating = None
+    max_rating = None
     try:
         clean  = raw.strip().strip("```json").strip("```").strip()
-        # Sometimes phi3 wraps in extra text — find the JSON object
         start  = clean.find("{")
         end    = clean.rfind("}") + 1
         parsed = json.loads(clean[start:end])
+        
         intent = parsed.get("intent", "chitchat")
         genres = parsed.get("genres", [])
+        min_year = parsed.get("min_year")
+        max_year = parsed.get("max_year")
+        min_rating = parsed.get("min_rating")
+        max_rating = parsed.get("max_rating")
+        
     except Exception:
-        # Fallback: keyword match
+        # Fallback if the small LLM messes up the JSON formatting
         lower = last_msg.lower()
-        if any(w in lower for w in ["recommend", "suggest", "suggest me",
-                                     "show me", "find me", "what should i watch",
-                                     "good movies", "movies to watch"]):
+        if any(w in lower for w in ["recommend", "suggest", "find me"]):
             intent = "recommend"
-        elif any(w in lower for w in ["different", "more", "other", "else",
-                                       "another", "show more"]):
-            intent = "refine"
-        else:
-            intent = "chitchat"
-        genres = []
 
     existing = state.get("liked_genres", [])
     merged   = list(set(existing + [g.lower() for g in genres]))
 
-    print(f"  [intent: {intent} | genres: {merged}]")  # visible debug line
-    return {"intent": intent, "liked_genres": merged, "last_query": last_msg}
+        # After the try/except block that parses the LLM output, add this:
+    print(f"  [classify] intent={intent}, genres={merged}")
+    print(f"  [classify] min_year={min_year}, max_year={max_year}, "
+          f"min_rating={min_rating}, max_rating={max_rating}")
 
+    # Return the new state variables!
+    return {
+        "intent": intent, 
+        "liked_genres": merged, 
+        "last_query": last_msg,
+        "min_year": min_year,
+        "max_year": max_year,
+        "min_rating": min_rating,
+        "max_rating": max_rating
+    }
 
 # ── Node 2: DB stats answer ───────────────────────────────────
 def db_stats_node(state: ChatbotState) -> dict:
-    answer = query_db_stats(state["last_query"])
-    return {"messages": [AIMessage(content=answer or "Could not compute that stat.")]}
+    # answer = query_db_stats(state["last_query"])
+    # return {"messages": [AIMessage(content=answer or "Could not compute that stat.")]}
+    # Use the pre-computed answer instead of re-querying
+    answer = state.get("context", "Could not compute that stat.")
+    return {"messages": [AIMessage(content=answer)]}
 
-
-# ── Node 3: retrieve ──────────────────────────────────────────
 def retrieve_node(state: ChatbotState) -> dict:
     query = state["last_query"]
     seen  = state.get("seen_titles", [])
     liked = state.get("liked_genres", [])
+    
+    # 1. Build the metadata filter list dynamically
+    filter_conditions = []
+
     if liked:
-        query = f"{query} genres: {', '.join(liked)}"
+        # For a single genre, use direct filter
+        if len(liked) == 1:
+            filter_conditions.append(
+                {"genres": {"$contains": liked[0]}}
+            )
+        else:
+            # Multiple genres: match ANY of them
+            genre_ors = [
+                {"genres": {"$contains": g}} for g in liked
+            ]
+            filter_conditions.append({"$or": genre_ors})
+    
+    if state.get("min_year"):
+        filter_conditions.append({"year": {"$gte": state["min_year"]}})
+    if state.get("max_year"):
+        filter_conditions.append({"year": {"$lte": state["max_year"]}})
+    if state.get("min_rating"):
+        filter_conditions.append({"rating": {"$gte": state["min_rating"]}})
+    if state.get("max_rating"):
+        filter_conditions.append({"rating": {"$lte": state["max_rating"]}})
+    # 2. Format it into a Chroma-compatible dictionary
+    where_clause = None
+    if len(filter_conditions) == 1:
+        where_clause = filter_conditions[0]
+    elif len(filter_conditions) > 1:
+        where_clause = {"$and": filter_conditions} # Chroma requires $and for multiple rules
 
-    docs       = retriever.invoke(query)
-    fresh_docs = [d for d in docs if d.metadata.get("title", "") not in seen]
-    if not fresh_docs:
-        fresh_docs = docs
-
-    context = "\n\n".join(
-        f"[{i+1}] Title: {d.metadata['title']} ({d.metadata['year']})\n"
-        f"     Genres: {d.metadata['genres']}\n"
-        f"     Rating: {d.metadata['rating']}\n"
-        f"     Plot: {d.page_content.split('Plot:')[-1].strip()[:250]}..."
-        for i, d in enumerate(fresh_docs[:5])
+    # 3. Search the vector database WITH the mathematical filters applied
+    docs = vectorstore.similarity_search(
+        query, 
+        k=50, # Fetch more upfront so we have enough after filtering out seen movies
+        filter=where_clause
     )
-    new_titles = [d.metadata.get("title", "") for d in fresh_docs[:5]]
-    all_seen   = list(set(seen + new_titles))
-    return {"context": context, "seen_titles": all_seen}
 
+    seen_titles_set = set(seen)
+    unique_docs = []
+    for d in docs:
+        title = d.metadata.get("title", "")
+        if title not in seen_titles_set:
+            unique_docs.append(d)
+            seen_titles_set.add(title)
+
+    if not unique_docs:
+        unique_docs = [
+            d for d in docs
+            if d.metadata.get("title", "") not in set(seen)
+        ]
+
+    results_to_show = unique_docs[:10]
+
+    # ✅ Clean formatting
+    context_lines = []
+    for i, d in enumerate(results_to_show):
+        genres_raw = d.metadata.get('genres', '')
+        if isinstance(genres_raw, list):
+            genres_display = ", ".join(genres_raw)
+        else:
+            genres_display = str(genres_raw)
+
+        context_lines.append(
+            f"[{i+1}] {d.metadata['title']} ({d.metadata.get('year', 'N/A')})\n"
+            f"    Genre: {genres_display}\n"
+            f"    Rating: {d.metadata.get('rating', 'N/A')}/10\n"
+            f"    Plot: {d.page_content.split('Plot:')[-1].strip()[:200]}"
+        )
+
+    context = "\n\n".join(context_lines)
+
+    
+    new_titles = [d.metadata.get("title", "") for d in results_to_show]
+    all_seen   = list(set(seen + new_titles))
+
+    print(f"  [retrieve] docs found: {len(docs)}, showing: {len(results_to_show)}")
+
+    print(f"  [retrieve] query={query}")
+    print(f"  [retrieve] where_clause={where_clause}")
+    print(f"  [retrieve] docs found={len(docs)}")
+    print(f"  [retrieve] fresh docs={len(unique_docs)}")
+
+    
+    return {"context": context, "seen_titles": all_seen}
 
 # ── Node 4: refine ────────────────────────────────────────────
 def refine_node(state: ChatbotState) -> dict:
@@ -309,24 +435,56 @@ def refine_node(state: ChatbotState) -> dict:
 
 
 # ── Node 5: generate RAG answer ───────────────────────────────
-def generate_rag_node(state: ChatbotState) -> dict:
-    liked     = state.get("liked_genres", [])
-    pref_note = f"The user likes: {', '.join(liked)}. " if liked else ""
+# following code was commented as LLM was outputing 2-3 list of movies despite have more than it , if you can run large model then use following block 
+# def generate_rag_node(state: ChatbotState) -> dict:
+#     liked     = state.get("liked_genres", [])
+#     pref_note = f"The user likes: {', '.join(liked)}. " if liked else ""
+#     context   = state.get("context", "")
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system",
-         "You are a movie recommendation assistant. "
-         f"{pref_note}"
-         "Use ONLY the movies in the Context below — do not mention any other movies. "
-         "For each movie state: title, year, genre, and one sentence about the plot.\n\n"
-         "Context:\n{context}"),
-        MessagesPlaceholder(variable_name="messages"),
-    ])
-    response = (prompt | llm | StrOutputParser()).invoke({
-        "context":  state["context"],
-        "messages": state["messages"],
-    })
-    return {"messages": [AIMessage(content=response)]}
+#     # If no context, tell the user directly — don't let LLM hallucinate
+#     if not context.strip():
+#         return {
+#             "messages": [AIMessage(
+#                 content="I couldn't find any movies matching your filters. "
+#                         "Try widening your year range or lowering the rating threshold."
+#             )]
+#         }
+
+#     prompt = ChatPromptTemplate.from_messages([
+#         ("system",
+#          "You are a movie recommendation assistant. "
+#          f"{pref_note}"
+#          "Use ONLY the movies in the Context below — do not mention any other movies. "
+#          "For each movie state: title, year, genre, and one sentence about the plot.\n\n"
+#          "Context:\n{context}"),
+#         MessagesPlaceholder(variable_name="messages"),
+#     ])
+#     response = (prompt | llm | StrOutputParser()).invoke({
+#         "context":  state["context"],
+#         "messages": state["messages"],
+#     })
+#     return {"messages": [AIMessage(content=response)]}
+
+# following code is added as alternative LLM processing
+def generate_rag_node(state: ChatbotState) -> dict:
+    context = state.get("context", "")
+
+    # No context = no results
+    if not context.strip():
+        return {
+            "messages": [AIMessage(
+                content="No movies found matching your filters. "
+                        "Try widening your year range or lowering the rating."
+            )]
+        }
+
+    # ✅ Format directly — no LLM needed for structured data
+    liked = state.get("liked_genres", [])
+    pref_note = f"Based on your interest in {', '.join(liked)}:\n\n" if liked else ""
+
+    reply = pref_note + context
+
+    return {"messages": [AIMessage(content=reply)]}
 
 
 # ── Node 6: chitchat ──────────────────────────────────────────
@@ -355,6 +513,23 @@ def route_intent(state: ChatbotState) -> Literal["retrieve", "refine",
         "db_stats":  "db_stats",
     }.get(intent, "chitchat")
 
+def init_stats_if_needed():
+    if os.path.exists(STATS_DB):
+        conn = sqlite3.connect(STATS_DB)
+        count = conn.execute("SELECT COUNT(*) FROM movies").fetchone()[0]
+        conn.close()
+        chroma_count = vectorstore._collection.count()
+
+        if count == chroma_count:
+            print(f"Stats DB ready ({count:,} movies)")
+            return
+        else:
+            print(f"Stats DB stale ({count:,} vs {chroma_count:,} in ChromaDB), rebuilding...")
+
+    build_stats_database()
+
+# Call once at startup
+init_stats_if_needed()
 
 # ── Build graph ───────────────────────────────────────────────
 def build_graph():
