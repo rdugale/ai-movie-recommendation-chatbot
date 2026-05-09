@@ -33,7 +33,8 @@ LangGraph Agent  ──→  Intent classifier (phi3:mini)
 - **ChromaDB** — local vector store with HNSW index (238k+ movies)
 - **sentence-transformers** (`all-MiniLM-L6-v2`) — local embeddings, runs on CPU
 - **Ollama + phi3:mini** — local LLM, runs on GPU (GTX 1650 / 4GB VRAM)
-- **Gradio** — browser-based chat UI
+- **FastAPI + React/TypeScript + Tailwind v3** — modern web UI (new)
+- **Gradio** — lightweight browser-based chat UI (original)
 - **Dataset** — [jquigl/imdb-genres](https://huggingface.co/datasets/jquigl/imdb-genres) from HuggingFace (~238k movies with title, genre, rating, plot)
 
 ---
@@ -46,7 +47,8 @@ LangGraph Agent  ──→  Intent classifier (phi3:mini)
 - 🧠 **Preference memory** — learns your liked genres across the conversation
 - 📊 **Database analytics** — query counts, highest/lowest rated movies per genre directly from ChromaDB
 - 💻 **100% local** — no API keys, no internet required after setup, no data sent anywhere
-- 🖥️ **Gradio UI** — clean browser interface at `http://localhost:7860`
+- ⚛️ **React/TypeScript UI** — dark cinema-themed web app with interactive setup wizard
+- 🖥️ **Gradio UI** — lightweight browser interface at `http://localhost:7860` (original)
 
 ---
 
@@ -105,49 +107,134 @@ ollama serve
 ## Project Structure
 
 ```
-movie-recommendation-chatbot/
-├── download_data.py      # Step 1 — fetch dataset from HuggingFace
-├── build_index.py        # Step 2 — embed movies and build ChromaDB index
-├── chatbot.py            # Core — LangGraph agent (nodes, edges, routing)
-├── gradio_app.py         # UI — Gradio web interface
-├── test.py               # CLI — command-line chat interface
-├── imdb_movies.csv       # Downloaded dataset (created by download_data.py)
-└── chroma_imdb/          # ChromaDB vector index (created by build_index.py)
-    ├── chroma.sqlite3
-    └── <uuid>/
-        ├── data_level0.bin
-        └── index.bin
+movie-recommender/
+├── download_data.py        # Step 1 — fetch dataset from HuggingFace
+├── build_index.py          # Step 2 — embed movies and build ChromaDB index
+├── chatbot.py              # Core — LangGraph agent (nodes, edges, routing)
+├── llm_api.py              # Optional Groq API integration
+├── gradio_app.py           # UI — Gradio web interface (original)
+├── imdb_movies.csv         # Downloaded dataset (created by download_data.py)
+├── movie_stats.db          # SQLite stats cache (created at first run)
+├── chroma_imdb/            # ChromaDB vector index (created by build_index.py)
+│   ├── chroma.sqlite3
+│   └── <uuid>/
+├── backend/                # FastAPI backend (new)
+│   ├── main.py             # FastAPI app, CORS, lifespan startup
+│   ├── run.py              # Dev launcher (watches parent dir for reload)
+│   ├── requirements.txt
+│   ├── core/
+│   │   └── graph_manager.py   # Singleton wrapping the LangGraph graph
+│   ├── api/
+│   │   ├── chat.py            # POST /api/chat
+│   │   ├── session.py         # POST /api/session/new
+│   │   ├── stats.py           # GET  /api/stats
+│   │   └── setup.py           # GET/POST /api/setup/* (SSE streaming)
+│   └── models/
+│       └── schemas.py         # Pydantic request/response models
+└── frontend/               # React + TypeScript + Tailwind v3 (new)
+    ├── src/
+    │   ├── pages/
+    │   │   ├── SetupPage.tsx   # Interactive setup wizard
+    │   │   └── ChatPage.tsx    # Full-screen cinema-themed chat
+    │   ├── components/         # MessageBubble, InputBar, ProgressLog, ...
+    │   ├── hooks/              # useChat, useSession, useSetup
+    │   └── api/                # Typed fetch wrappers
+    ├── tailwind.config.js
+    └── vite.config.ts
 ```
 
 ---
 
 ## Running the project
 
-> **Steps 1 and 2 only need to be run once.** After the index is built, go straight to step 3 or 4 on future runs.
+There are **two ways** to run this project:
+- **Option A — React + FastAPI** (new, recommended): full-featured web app with an interactive setup wizard
+- **Option B — Gradio / CLI** (original): quick single-file launch
 
-### Step 1 — Download the dataset (run once)
+---
+
+### Option A — React + FastAPI web app
+
+#### Prerequisites (one-time)
+
+Make sure Node.js ≥ 18 is installed:
+```bash
+node --version    # should print v18 or higher
+npm --version
+```
+
+Install frontend dependencies (one-time):
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+#### Step 1 — Start the FastAPI backend
+
+```bash
+# From the movie-recommender/ root
+source venv/bin/activate
+cd backend
+python run.py or uvicorn main:app --reload
+```
+
+The backend starts at **http://localhost:8000**.  
+`run.py` uses `--reload` and watches both `backend/` and the parent directory, so any change to `chatbot.py` or backend files restarts automatically.
+
+#### Step 2 — Start the React frontend
+
+Open a **second terminal**:
+
+```bash
+# From the movie-recommender/ root
+cd frontend
+npm run dev
+```
+
+The frontend starts at **http://localhost:5173**.
+
+#### Step 3 — Open the app
+
+Go to **http://localhost:5173** in your browser.
+
+**First time only:** The app detects that the dataset/index is missing and shows the **Setup Wizard**:
+
+1. **Download Dataset** — click the button; streams progress as it downloads ~238k movies from HuggingFace and saves `imdb_movies.csv`
+2. **Build Vector Index** — choose GPU (cuda, ~11 min) or CPU (~31 min); click the button; a live progress bar and log stream the indexing
+3. **Go to Chat** — once setup is complete, click to enter the chat
+
+**On subsequent runs:** The app skips setup and goes straight to the chat.
+
+---
+
+### Option B — Original CLI / Gradio
+
+> **Steps 1 and 2 only need to be run once.** After the index is built, skip to step 3 or 4.
+
+#### Step 1 — Download the dataset (run once)
 
 ```bash
 python3 download_data.py
 ```
 
-Downloads ~238k movies with title, genre, rating, and plot descriptions from HuggingFace. Saves to `imdb_movies.csv`.
+Downloads ~238k movies and saves to `imdb_movies.csv`.
 
-### Step 2 — Build the vector index (run once)
+#### Step 2 — Build the vector index (run once)
 
 ```bash
 python3 build_index.py
 ```
 
-Embeds all movies using `all-MiniLM-L6-v2` and stores them in ChromaDB. Takes ~11–31 minutes depending on hardware. Creates the `chroma_imdb/` folder.
+Embeds all movies using `all-MiniLM-L6-v2` and stores them in ChromaDB. Takes ~11–31 minutes depending on hardware.
 
-### Step 3a — Run the CLI chatbot
+#### Step 3a — Run the CLI chatbot
 
 ```bash
 python3 chatbot.py
 ```
 
-### Step 3b — Run the Gradio web UI (recommended)
+#### Step 3b — Run the Gradio web UI
 
 ```bash
 python3 gradio_app.py
@@ -238,4 +325,8 @@ using Grok for API LLM call for classify and generate node logic, which can be t
 - [Ollama](https://ollama.com) — local LLM serving
 - [ChromaDB](https://www.trychroma.com) — local vector database
 - [HuggingFace Datasets](https://huggingface.co/datasets/jquigl/imdb-genres) — IMDb genres dataset
-- [Gradio](https://gradio.app) — web UI framework
+- [FastAPI](https://fastapi.tiangolo.com) — Python web framework for the backend API
+- [React](https://react.dev) + [TypeScript](https://www.typescriptlang.org) — frontend UI
+- [Tailwind CSS v3](https://tailwindcss.com) — utility-first CSS framework
+- [Vite](https://vitejs.dev) — frontend build tool
+- [Gradio](https://gradio.app) — original lightweight web UI framework
