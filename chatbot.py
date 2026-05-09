@@ -198,30 +198,62 @@ def query_db_stats(user_msg: str) -> str | None:
     # ── HIGHEST / LOWEST RATED ────────────────────────────
     rating_triggers = ["highest rated", "best rated", "top rated",
                        "lowest rated", "worst rated", "least rated"]
+    per_genre_triggers = ["each genre", "all genre", "every genre", "per genre",
+                          "each category", "all categories"]
     if any(k in msg for k in rating_triggers):
-        is_highest = any(k in msg for k in ["highest", "best", "top"])
-        order = "DESC" if is_highest else "ASC"
-        label = "Highest" if is_highest else "Lowest"
+        want_highest = any(k in msg for k in ["highest", "best", "top"])
+        want_lowest  = any(k in msg for k in ["lowest", "worst", "least"])
+        want_per_genre = any(k in msg for k in per_genre_triggers)
 
-        if matched_genre:
-            row = c.execute(
-                f"SELECT title, year, rating, genres FROM movies "
-                f"WHERE genres LIKE ? AND rating > 0 "
-                f"ORDER BY rating {order} LIMIT 1",
-                (f"%{matched_genre}%",)
-            ).fetchone()
+        queries = []
+        if want_highest:
+            queries.append(("DESC", "Highest"))
+        if want_lowest:
+            queries.append(("ASC", "Lowest"))
+        if not queries:
+            queries = [("DESC", "Highest")]
+
+        if want_per_genre and not matched_genre:
+            # Fetch all genres and return highest/lowest for each
+            genres = [row[0] for row in c.execute(
+                "SELECT genre FROM genre_counts ORDER BY cnt DESC"
+            ).fetchall()]
+            for g in genres:
+                genre_results = []
+                for order, label in queries:
+                    row = c.execute(
+                        f"SELECT title, year, rating, genres FROM movies "
+                        f"WHERE genres LIKE ? AND rating > 0 "
+                        f"ORDER BY rating {order} LIMIT 1",
+                        (f"%{g}%",)
+                    ).fetchone()
+                    if row:
+                        genre_results.append(
+                            f"  {label}: {row[0]} ({row[1]}) — {row[2]}/10"
+                        )
+                if genre_results:
+                    results.append(f"**{g}**:\n" + "\n".join(genre_results))
         else:
-            row = c.execute(
-                f"SELECT title, year, rating, genres FROM movies "
-                f"WHERE rating > 0 ORDER BY rating {order} LIMIT 1"
-            ).fetchone()
+            for order, label in queries:
+                if matched_genre:
+                    row = c.execute(
+                        f"SELECT title, year, rating, genres FROM movies "
+                        f"WHERE genres LIKE ? AND rating > 0 "
+                        f"ORDER BY rating {order} LIMIT 1",
+                        (f"%{matched_genre}%",)
+                    ).fetchone()
+                else:
+                    row = c.execute(
+                        f"SELECT title, year, rating, genres FROM movies "
+                        f"WHERE rating > 0 ORDER BY rating {order} LIMIT 1"
+                    ).fetchone()
 
-        if row:
-            results.append(
-                f"⭐ **{label} rated** {'(' + matched_genre + ')' if matched_genre else ''}:\n"
-                f"   {row[0]} ({row[1]}) — {row[2]}/10\n"
-                f"   Genres: {row[3]}"
-            )
+                if row:
+                    results.append(
+                        f"⭐ **{label} rated** {'(' + matched_genre + ')' if matched_genre else ''}:\n"
+                        f"   {row[0]} ({row[1]}) — {row[2]}/10\n"
+                        f"   Genres: {row[3]}"
+                    )
 
     conn.close()
     return "\n".join(results) if results else None

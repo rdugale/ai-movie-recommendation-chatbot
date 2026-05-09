@@ -1,0 +1,276 @@
+# =============================================================================
+# .claudeignore — Claude Code context exclusions
+# Optimized for: PHP (Laravel/Symfony/CodeIgniter) + Node.js SaaS projects
+# Purpose: Reduce input tokens, lower API cost, keep context focused
+# =============================================================================
+
+
+# =============================================================================
+# SECRETS & ENVIRONMENT — never send to any AI
+# =============================================================================
+.env
+.env.*
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.testing
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+secrets/
+.secrets/
+auth.json
+credentials.json
+service-account*.json
+
+
+# =============================================================================
+# VERSION CONTROL
+# =============================================================================
+.git/
+.gitattributes
+.gitmodules
+.svn/
+.hg/
+
+
+# =============================================================================
+# NODE.JS / JAVASCRIPT
+# =============================================================================
+node_modules/
+.npm/
+.yarn/
+.yarn-integrity
+.pnp.*
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+.pnpm-store/
+
+# Build output
+dist/
+build/
+.next/
+.nuxt/
+.output/
+out/
+.vite/
+.turbo/
+.swc/
+
+# Cache
+.cache/
+.eslintcache
+.stylelintcache
+.parcel-cache/
+.webpack/
+
+
+# =============================================================================
+# PHP FRAMEWORKS
+# =============================================================================
+
+# Laravel
+vendor/
+bootstrap/cache/
+storage/logs/
+storage/framework/cache/
+storage/framework/sessions/
+storage/framework/views/
+storage/app/public/
+public/storage/
+public/hot
+.phpunit.result.cache
+_ide_helper.php
+_ide_helper_models.php
+.phpstorm.meta.php
+composer.lock
+
+# Symfony
+var/cache/
+var/log/
+var/sessions/
+
+# CodeIgniter
+application/logs/
+application/cache/
+
+# WordPress (if applicable)
+wp-content/uploads/
+wp-content/cache/
+
+# General PHP
+*.phar
+
+
+# =============================================================================
+# COMPILED / GENERATED ASSETS
+# =============================================================================
+public/css/
+public/js/
+public/build/
+public/mix-manifest.json
+public/manifest.json
+resources/css/app.css
+*.min.js
+*.min.css
+*.map
+*.chunk.js
+
+
+# =============================================================================
+# LOGS & RUNTIME
+# =============================================================================
+*.log
+*.logs
+logs/
+log/
+tmp/
+temp/
+.tmp/
+pids/
+*.pid
+*.seed
+*.pid.lock
+crash.log
+crash.*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# =============================================================================
+# DATABASE & MIGRATIONS (exclude data dumps, keep migration files)
+# =============================================================================
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+database/data/
+storage/*.sqlite
+dump.rdb
+
+
+# =============================================================================
+# UPLOADS & MEDIA (user-generated content, large files)
+# =============================================================================
+uploads/
+media/
+storage/app/
+public/uploads/
+public/media/
+*.mp4
+*.mp3
+*.mov
+*.avi
+*.mkv
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+
+
+# =============================================================================
+# IMAGES (generated/uploaded — keep source design assets if small)
+# =============================================================================
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.ico
+*.svg
+*.webp
+*.bmp
+*.tiff
+# Exception: uncomment below to allow specific asset folders
+# !resources/images/
+# !public/img/brand/
+
+
+# =============================================================================
+# TESTING & COVERAGE
+# =============================================================================
+coverage/
+.nyc_output/
+test-results/
+junit.xml
+*.coverage
+.phpunit.cache/
+reports/
+
+
+# =============================================================================
+# IDE & EDITOR
+# =============================================================================
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.editorconfig
+
+
+# =============================================================================
+# DOCKER & INFRASTRUCTURE
+# =============================================================================
+.docker/
+docker-compose.override.yml
+*.dockerfile
+Dockerfile.prod
+.vagrant/
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+Pulumi.*.yaml
+
+
+# =============================================================================
+# CI/CD
+# =============================================================================
+.github/workflows/
+.gitlab-ci.yml
+.circleci/
+.travis.yml
+Jenkinsfile
+.buildkite/
+*.artifact
+
+
+# =============================================================================
+# DOCUMENTATION (usually not needed for coding tasks)
+# =============================================================================
+docs/
+documentation/
+*.pdf
+CHANGELOG.md
+CHANGELOG*.md
+# Keep README.md — Claude uses it for project context
+# Keep CONTRIBUTING.md if you want
+
+
+# =============================================================================
+# MISCELLANEOUS
+# =============================================================================
+.phpcs.xml
+phpstan.neon
+psalm.xml
+rector.php
+.php-cs-fixer.php
+.php-cs-fixer.cache
+sonar-project.properties
+.sonarcloud.properties
+*.bak
+*.orig
+*.rej
